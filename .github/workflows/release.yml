@@ -139,6 +139,7 @@ jobs:
             *.sha256
 
   update-tap:
+    if: github.repository == 'raine/claude-code-proxy'
     needs: release
     runs-on: ubuntu-latest
     steps:
