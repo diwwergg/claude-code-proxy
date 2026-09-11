@@ -148,13 +148,11 @@ fn run_server(port: Option<u16>, no_monitor: bool) -> Result<()> {
     match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
         ServeMode::Plain => {
             print_server_banner(&bind_address, effective_port, &registry);
-            runtime
-                .block_on(server::serve(ServerConfig {
-                    bind_address,
-                    port: effective_port,
-                    monitor: None,
-                }))
-                .map_err(anyhow::Error::from)
+            runtime.block_on(server::serve(ServerConfig {
+                bind_address,
+                port: effective_port,
+                monitor: None,
+            }))
         }
         ServeMode::Monitor => {
             let _stderr_guard = logging::suppress_stderr();
@@ -190,7 +188,7 @@ fn run_server(port: Option<u16>, no_monitor: bool) -> Result<()> {
             }
             let server_result = runtime.block_on(server_task)?;
             ui_result?;
-            server_result.map_err(anyhow::Error::from)
+            server_result
         }
     }
 }

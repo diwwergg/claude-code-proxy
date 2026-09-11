@@ -28,7 +28,8 @@ fn github_copilot_copy_sources_parse_without_reaching_io() {
     for source in ["vscode", "opencode"] {
         let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
         cmd.args(["github-copilot", "copy", source, "--help"])
-            .assert();
+            .assert()
+            .success();
     }
 }
 

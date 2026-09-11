@@ -8,7 +8,7 @@ use bytes::Bytes;
 use futures_util::StreamExt;
 use http::StatusCode;
 use serde::{Deserialize, Serialize};
-use serde_json::{Value, json};
+use serde_json::Value;
 use std::{
     convert::Infallible,
     fs,
@@ -574,10 +574,10 @@ fn save_auth(auth: &StoredAuth) -> anyhow::Result<()> {
 
 async fn ensure_copilot_token() -> anyhow::Result<String> {
     let mut auth = load_auth()?;
-    if let (Some(token), Some(exp)) = (&auth.copilot_token, auth.copilot_expires_at) {
-        if normalize_expiry(exp) > now_secs() + 60 {
-            return Ok(token.clone());
-        }
+    if let (Some(token), Some(exp)) = (&auth.copilot_token, auth.copilot_expires_at)
+        && normalize_expiry(exp) > now_secs() + 60
+    {
+        return Ok(token.clone());
     }
     let response = reqwest::Client::new()
         .get(COPILOT_TOKEN_URL)
@@ -604,10 +604,10 @@ async fn ensure_copilot_token() -> anyhow::Result<String> {
 }
 fn ensure_copilot_token_blocking() -> anyhow::Result<String> {
     let mut auth = load_auth()?;
-    if let (Some(token), Some(exp)) = (&auth.copilot_token, auth.copilot_expires_at) {
-        if normalize_expiry(exp) > now_secs() + 60 {
-            return Ok(token.clone());
-        }
+    if let (Some(token), Some(exp)) = (&auth.copilot_token, auth.copilot_expires_at)
+        && normalize_expiry(exp) > now_secs() + 60
+    {
+        return Ok(token.clone());
     }
     let response = reqwest::blocking::Client::new()
         .get(COPILOT_TOKEN_URL)
@@ -677,15 +677,15 @@ pub fn import_from(source: &str) -> anyhow::Result<()> {
 
 fn import_vscode() -> anyhow::Result<StoredAuth> {
     for name in ["COPILOT_GITHUB_TOKEN", "GH_TOKEN", "GITHUB_TOKEN"] {
-        if let Ok(token) = std::env::var(name) {
-            if valid_github_token(&token) {
-                return Ok(StoredAuth {
-                    github_token: token,
-                    copilot_token: None,
-                    copilot_expires_at: None,
-                    source: Some(format!("vscode:{name}")),
-                });
-            }
+        if let Ok(token) = std::env::var(name)
+            && valid_github_token(&token)
+        {
+            return Ok(StoredAuth {
+                github_token: token,
+                copilot_token: None,
+                copilot_expires_at: None,
+                source: Some(format!("vscode:{name}")),
+            });
         }
     }
     for path in vscode_candidates() {
@@ -877,6 +877,7 @@ static CLI: CopilotCli = CopilotCli;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
     #[test]
     fn gpt_fast_is_alias_only() {
         assert_eq!(
