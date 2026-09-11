@@ -27,44 +27,81 @@ enum Commands {
     Version,
     /// Start the proxy server and monitor
     Serve {
-        #[arg(long)] port: Option<u16>,
-        #[arg(long = "no-monitor", action = ArgAction::SetTrue)] no_monitor: bool,
+        #[arg(long)]
+        port: Option<u16>,
+        #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
+        no_monitor: bool,
     },
     /// Open the monitor TUI with mock data and no proxy server
     #[command(hide = true)]
     Demo,
     /// List supported provider models
-    Models { #[arg(long)] full: bool },
+    Models {
+        #[arg(long)]
+        full: bool,
+    },
     /// Manage Codex authentication
-    Codex { #[command(subcommand)] command: ProviderGroup },
+    Codex {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Manage Kimi authentication
-    Kimi { #[command(subcommand)] command: ProviderGroup },
+    Kimi {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Manage Cursor authentication
-    Cursor { #[command(subcommand)] command: ProviderGroup },
+    Cursor {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Manage Grok authentication
-    Grok { #[command(subcommand)] command: ProviderGroup },
+    Grok {
+        #[command(subcommand)]
+        command: ProviderGroup,
+    },
     /// Manage GitHub Copilot authentication, credential copy, and live models
-    GithubCopilot { #[command(subcommand)] command: GithubCopilotGroup },
+    GithubCopilot {
+        #[command(subcommand)]
+        command: GithubCopilotGroup,
+    },
 }
 
 #[derive(Debug, Subcommand)]
 enum ProviderGroup {
-    Auth { #[command(subcommand)] command: claude_code_proxy::provider::AuthCommand },
+    Auth {
+        #[command(subcommand)]
+        command: claude_code_proxy::provider::AuthCommand,
+    },
 }
 
 #[derive(Debug, Clone, ValueEnum)]
-enum CopilotCopySource { Vscode, Opencode }
+enum CopilotCopySource {
+    Vscode,
+    Opencode,
+}
 impl CopilotCopySource {
-    fn as_str(&self) -> &'static str { match self { Self::Vscode => "vscode", Self::Opencode => "opencode" } }
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Vscode => "vscode",
+            Self::Opencode => "opencode",
+        }
+    }
 }
 
 #[derive(Debug, Subcommand)]
 enum GithubCopilotGroup {
     /// Authenticate directly with GitHub device flow
-    Auth { #[command(subcommand)] command: claude_code_proxy::provider::AuthCommand },
+    Auth {
+        #[command(subcommand)]
+        command: claude_code_proxy::provider::AuthCommand,
+    },
     /// Copy existing GitHub Copilot credentials from VS Code or OpenCode
     #[command(alias = "import")]
-    Copy { #[arg(value_enum)] source: CopilotCopySource },
+    Copy {
+        #[arg(value_enum)]
+        source: CopilotCopySource,
+    },
     /// Query the live GitHub Copilot model catalog
     Models,
 }
@@ -75,15 +112,24 @@ fn main() -> Result<()> {
         println!("claude-code-proxy {}", VERSION);
         return Ok(());
     }
-    let command = cli.command.unwrap_or(Commands::Serve { port: None, no_monitor: false });
+    let command = cli.command.unwrap_or(Commands::Serve {
+        port: None,
+        no_monitor: false,
+    });
     match command {
-        Commands::Version => { println!("claude-code-proxy {}", VERSION); Ok(()) }
+        Commands::Version => {
+            println!("claude-code-proxy {}", VERSION);
+            Ok(())
+        }
         Commands::Serve { port, no_monitor } => run_server(port, no_monitor),
         Commands::Demo => {
             let registry = Registry::with_default_alias();
             tui::run_mock_monitor(config::port(), &registry)
         }
-        Commands::Models { full } => { print_models(&Registry::with_default_alias(), full); Ok(()) }
+        Commands::Models { full } => {
+            print_models(&Registry::with_default_alias(), full);
+            Ok(())
+        }
         Commands::Codex { command } => run_provider_cli("codex", command),
         Commands::Kimi { command } => run_provider_cli("kimi", command),
         Commands::Cursor { command } => run_provider_cli("cursor", command),
@@ -96,22 +142,32 @@ fn run_server(port: Option<u16>, no_monitor: bool) -> Result<()> {
     let bind_address = config::bind_address();
     let effective_port = port.unwrap_or_else(config::port);
     let registry = Registry::with_default_alias();
-    let runtime = tokio::runtime::Builder::new_multi_thread().enable_all().build()?;
+    let runtime = tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?;
     match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
         ServeMode::Plain => {
             print_server_banner(&bind_address, effective_port, &registry);
-            runtime.block_on(server::serve(ServerConfig { bind_address, port: effective_port, monitor: None })).map_err(anyhow::Error::from)
+            runtime.block_on(server::serve(ServerConfig {
+                bind_address,
+                port: effective_port,
+                monitor: None,
+            }))
         }
         ServeMode::Monitor => {
             let _stderr_guard = logging::suppress_stderr();
             let monitor = MonitorHandle::default();
             let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
             let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
-            let listener = runtime.block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
+            let listener =
+                runtime.block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
             let local_addr = listener.local_addr()?;
             let server_monitor = monitor.clone();
             let server_task = runtime.spawn(async move {
-                let result = server::serve_listener(listener, Some(server_monitor), async move { let _ = shutdown_rx.await; }).await;
+                let result = server::serve_listener(listener, Some(server_monitor), async move {
+                    let _ = shutdown_rx.await;
+                })
+                .await;
                 let _ = shutdown_complete_tx.send(());
                 result
             });
@@ -132,20 +188,29 @@ fn run_server(port: Option<u16>, no_monitor: bool) -> Result<()> {
             }
             let server_result = runtime.block_on(server_task)?;
             ui_result?;
-            server_result.map_err(anyhow::Error::from)
+            server_result
         }
     }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum ServeMode { Monitor, Plain }
+enum ServeMode {
+    Monitor,
+    Plain,
+}
 fn select_serve_mode(stdout_is_tty: bool, no_monitor: bool) -> ServeMode {
-    if stdout_is_tty && !no_monitor { ServeMode::Monitor } else { ServeMode::Plain }
+    if stdout_is_tty && !no_monitor {
+        ServeMode::Monitor
+    } else {
+        ServeMode::Plain
+    }
 }
 
 fn run_provider_cli(name: &str, command: ProviderGroup) -> Result<()> {
     let registry = Registry::with_default_alias();
-    let provider = registry.provider(name).ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
+    let provider = registry
+        .provider(name)
+        .ok_or_else(|| anyhow::anyhow!("unknown provider: {name}"))?;
     let ProviderGroup::Auth { command } = command;
     run_auth_command(provider.cli(), command)
 }
@@ -154,49 +219,93 @@ fn run_github_copilot_cli(command: GithubCopilotGroup) -> Result<()> {
     match command {
         GithubCopilotGroup::Auth { command } => {
             let registry = Registry::with_default_alias();
-            let provider = registry.provider("github-copilot").ok_or_else(|| anyhow::anyhow!("GitHub Copilot provider is unavailable"))?;
+            let provider = registry
+                .provider("github-copilot")
+                .ok_or_else(|| anyhow::anyhow!("GitHub Copilot provider is unavailable"))?;
             run_auth_command(provider.cli(), command)
         }
-        GithubCopilotGroup::Copy { source } => claude_code_proxy::providers::github_copilot::import_from(source.as_str()),
+        GithubCopilotGroup::Copy { source } => {
+            claude_code_proxy::providers::github_copilot::import_from(source.as_str())
+        }
         GithubCopilotGroup::Models => {
-            for model in claude_code_proxy::providers::github_copilot::discover_models()? { println!("{model}"); }
+            for model in claude_code_proxy::providers::github_copilot::discover_models()? {
+                println!("{model}");
+            }
             Ok(())
         }
     }
 }
 
-fn run_auth_command(handlers: &'static dyn claude_code_proxy::provider::CliHandlers, command: claude_code_proxy::provider::AuthCommand) -> Result<()> {
+fn run_auth_command(
+    handlers: &'static dyn claude_code_proxy::provider::CliHandlers,
+    command: claude_code_proxy::provider::AuthCommand,
+) -> Result<()> {
     use claude_code_proxy::provider::AuthCommand;
     match command {
-        AuthCommand::Login => { if let Err(e) = handlers.login() { eprintln!("{e}"); std::process::exit(2); } Ok(()) }
-        AuthCommand::Device => { if let Err(e) = handlers.device() { eprintln!("{e}"); std::process::exit(2); } Ok(()) }
-        AuthCommand::Status => {
-            if let Err(e) = handlers.status() {
-                println!("{e}");
-                if e.to_string() == "Not authenticated" { std::process::exit(1); }
+        AuthCommand::Login => {
+            if let Err(e) = handlers.login() {
+                eprintln!("{e}");
                 std::process::exit(2);
             }
             Ok(())
         }
-        AuthCommand::Logout => { handlers.logout()?; Ok(()) }
+        AuthCommand::Device => {
+            if let Err(e) = handlers.device() {
+                eprintln!("{e}");
+                std::process::exit(2);
+            }
+            Ok(())
+        }
+        AuthCommand::Status => {
+            if let Err(e) = handlers.status() {
+                println!("{e}");
+                if e.to_string() == "Not authenticated" {
+                    std::process::exit(1);
+                }
+                std::process::exit(2);
+            }
+            Ok(())
+        }
+        AuthCommand::Logout => {
+            handlers.logout()?;
+            Ok(())
+        }
     }
 }
 
 fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
-    for provider in ["codex", "github-copilot", "kimi", "grok", "opencode", "cursor"] {
-        let Some(models) = grouped.get(provider) else { continue; };
-        if full || provider != "cursor" { println!("{provider}: {}", models.join(", ")); }
-        else { println!("{provider}: {}", compact_cursor_list(models)); }
+    for provider in [
+        "codex",
+        "github-copilot",
+        "kimi",
+        "grok",
+        "opencode",
+        "cursor",
+    ] {
+        let Some(models) = grouped.get(provider) else {
+            continue;
+        };
+        if full || provider != "cursor" {
+            println!("{provider}: {}", models.join(", "));
+        } else {
+            println!("{provider}: {}", compact_cursor_list(models));
+        }
     }
 }
 
 fn compact_cursor_list(models: &[String]) -> String {
-    let (legacy, dynamic): (Vec<_>, Vec<_>) = models.iter().cloned().partition(|m| !m.contains(':'));
+    let (legacy, dynamic): (Vec<_>, Vec<_>) =
+        models.iter().cloned().partition(|m| !m.contains(':'));
     let mut out = String::new();
-    if !legacy.is_empty() { out.push_str(&legacy.join(", ")); out.push_str("; "); }
+    if !legacy.is_empty() {
+        out.push_str(&legacy.join(", "));
+        out.push_str("; ");
+    }
     out.push_str(&format!("{} cursor model aliases", dynamic.len()));
-    if !dynamic.is_empty() { out.push_str(", example: cursor:gpt-5.5"); }
+    if !dynamic.is_empty() {
+        out.push_str(", example: cursor:gpt-5.5");
+    }
     out.push_str(" run `claude-code-proxy models --full` for all aliases");
     out
 }
@@ -212,7 +321,9 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
     println!("Proxy listening on {}", listen_url(bind_address, port));
     println!("Logs: {}", paths::log_file().display());
     let cfg = paths::config_dir();
-    if cfg.exists() { println!("Config: {}", cfg.display()); }
+    if cfg.exists() {
+        println!("Config: {}", cfg.display());
+    }
     print_models(registry, false);
     println!();
     println!("Configure Claude Code (pick a model from above):");
@@ -224,29 +335,68 @@ fn print_server_banner(bind_address: &str, port: u16, registry: &Registry) {
 }
 
 #[allow(dead_code)]
-fn alias_names() -> usize { ANTHROPIC_STYLE_ALIASES.len() }
+fn alias_names() -> usize {
+    ANTHROPIC_STYLE_ALIASES.len()
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test] fn default_serve_selects_monitor_on_tty() { assert_eq!(select_serve_mode(true, false), ServeMode::Monitor); }
-    #[test] fn no_monitor_selects_plain_mode() { assert_eq!(select_serve_mode(true, true), ServeMode::Plain); }
-    #[test] fn non_tty_stdout_selects_plain_mode() { assert_eq!(select_serve_mode(false, false), ServeMode::Plain); }
-    #[test] fn demo_command_parses_without_server_options() {
+    #[test]
+    fn default_serve_selects_monitor_on_tty() {
+        assert_eq!(select_serve_mode(true, false), ServeMode::Monitor);
+    }
+    #[test]
+    fn no_monitor_selects_plain_mode() {
+        assert_eq!(select_serve_mode(true, true), ServeMode::Plain);
+    }
+    #[test]
+    fn non_tty_stdout_selects_plain_mode() {
+        assert_eq!(select_serve_mode(false, false), ServeMode::Plain);
+    }
+    #[test]
+    fn demo_command_parses_without_server_options() {
         let cli = Cli::try_parse_from(["claude-code-proxy", "demo"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Demo)));
     }
-    #[test] fn github_copilot_copy_cli_parses() {
-        let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "copy", "opencode"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::GithubCopilot { command: GithubCopilotGroup::Copy { source: CopilotCopySource::Opencode } })));
+    #[test]
+    fn github_copilot_copy_cli_parses() {
+        let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "copy", "opencode"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::GithubCopilot {
+                command: GithubCopilotGroup::Copy {
+                    source: CopilotCopySource::Opencode
+                }
+            })
+        ));
     }
-    #[test] fn github_copilot_import_alias_parses() {
-        let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "import", "vscode"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::GithubCopilot { command: GithubCopilotGroup::Copy { source: CopilotCopySource::Vscode } })));
+    #[test]
+    fn github_copilot_import_alias_parses() {
+        let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "import", "vscode"])
+            .unwrap();
+        assert!(matches!(
+            cli.command,
+            Some(Commands::GithubCopilot {
+                command: GithubCopilotGroup::Copy {
+                    source: CopilotCopySource::Vscode
+                }
+            })
+        ));
     }
-    #[test] fn github_copilot_models_cli_parses() {
+    #[test]
+    fn github_copilot_models_cli_parses() {
         let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "models"]).unwrap();
-        assert!(matches!(cli.command, Some(Commands::GithubCopilot { command: GithubCopilotGroup::Models })));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::GithubCopilot {
+                command: GithubCopilotGroup::Models
+            })
+        ));
     }
-    #[test] fn listen_url_brackets_ipv6_addresses() { assert_eq!(listen_url("::1", 18765), "http://[::1]:18765"); }
+    #[test]
+    fn listen_url_brackets_ipv6_addresses() {
+        assert_eq!(listen_url("::1", 18765), "http://[::1]:18765");
+    }
 }
