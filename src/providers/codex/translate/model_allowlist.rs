@@ -66,11 +66,12 @@ pub fn resolve_model_request_with_config_override(
     model: &str,
     apply_config_override: bool,
 ) -> ResolvedModel {
+    let un_prefixed = model.strip_prefix("openai:").unwrap_or(model);
     let alias = MODEL_ALIASES
         .iter()
-        .find(|(alias, _)| *alias == model)
+        .find(|(alias, _)| *alias == un_prefixed)
         .map(|(_, target)| *target)
-        .unwrap_or(model);
+        .unwrap_or(un_prefixed);
 
     let requested = resolve_fast_model_alias(alias);
 
@@ -204,6 +205,20 @@ mod tests {
         let r = resolve_model_request("gpt-5.6-sol-fast");
         assert_eq!(r.model, "gpt-5.6-sol");
         assert_eq!(r.service_tier, Some(ServiceTier::Priority));
+    }
+
+    #[test]
+    fn openai_prefix_resolves() {
+        let r1 = resolve_model_request("openai:gpt-5.6-luna");
+        assert_eq!(r1.model, "gpt-5.6-luna");
+        assert_eq!(r1.service_tier, None);
+
+        let r2 = resolve_model_request("openai:haiku");
+        assert_eq!(r2.model, "gpt-5.6-luna");
+
+        let r3 = resolve_model_request("openai:gpt-5.6-sol-fast");
+        assert_eq!(r3.model, "gpt-5.6-sol");
+        assert_eq!(r3.service_tier, Some(ServiceTier::Priority));
     }
 
     #[test]

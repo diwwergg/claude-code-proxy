@@ -523,6 +523,8 @@ impl Provider for CodexProvider {
             .collect();
         for m in registry::CODEX_MODELS {
             models.push(format!("{m}-fast"));
+            models.push(format!("openai:{m}"));
+            models.push(format!("openai:{m}-fast"));
         }
         models.sort_unstable();
         models.dedup();

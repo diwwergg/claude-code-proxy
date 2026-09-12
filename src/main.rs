@@ -61,6 +61,7 @@ enum Commands {
         command: ProviderGroup,
     },
     /// Manage GitHub Copilot authentication, credential copy, and live models
+    #[command(name = "github-copilot", alias = "copilot")]
     GithubCopilot {
         #[command(subcommand)]
         command: GithubCopilotGroup,
@@ -220,8 +221,9 @@ fn run_github_copilot_cli(command: GithubCopilotGroup) -> Result<()> {
         GithubCopilotGroup::Auth { command } => {
             let registry = Registry::with_default_alias();
             let provider = registry
-                .provider("github-copilot")
-                .ok_or_else(|| anyhow::anyhow!("GitHub Copilot provider is unavailable"))?;
+                .provider("copilot")
+                .or_else(|| registry.provider("github-copilot"))
+                .ok_or_else(|| anyhow::anyhow!("Copilot provider is unavailable"))?;
             run_auth_command(provider.cli(), command)
         }
         GithubCopilotGroup::Copy { source } => {
@@ -277,6 +279,7 @@ fn print_models(registry: &Registry, full: bool) {
     let grouped = registry.grouped_models();
     for provider in [
         "codex",
+        "copilot",
         "github-copilot",
         "kimi",
         "grok",
@@ -365,6 +368,16 @@ mod tests {
             .unwrap();
         assert!(matches!(
             cli.command,
+            Some(Commands::GithubCopilot {
+                command: GithubCopilotGroup::Copy {
+                    source: CopilotCopySource::Opencode
+                }
+            })
+        ));
+        let cli_copilot = Cli::try_parse_from(["claude-code-proxy", "copilot", "copy", "opencode"])
+            .unwrap();
+        assert!(matches!(
+            cli_copilot.command,
             Some(Commands::GithubCopilot {
                 command: GithubCopilotGroup::Copy {
                     source: CopilotCopySource::Opencode

@@ -681,6 +681,43 @@ async fn context_window_hint_is_removed_before_provider_dispatch() {
 }
 
 #[tokio::test]
+async fn openai_prefix_and_context_size_routes_to_codex() {
+    let app = app(Arc::new(Registry::with_default_alias()));
+    let response = app
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/messages/count_tokens")
+                .header("content-type", "application/json")
+                .body(body_string(
+                    r#"{"model":"openai:gpt-5.6-luna[1m]","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response.status(), StatusCode::OK);
+
+    let app2 = app(Arc::new(Registry::with_default_alias()));
+    let response2 = app2
+        .oneshot(
+            Request::builder()
+                .method(Method::POST)
+                .uri("/v1/messages/count_tokens")
+                .header("content-type", "application/json")
+                .body(body_string(
+                    r#"{"model":"openai:gpt-5.6-sol[128k]","messages":[{"role":"user","content":"hello"}]}"#,
+                ))
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+
+    assert_eq!(response2.status(), StatusCode::OK);
+}
+
+#[tokio::test]
 async fn opus_5_alias_routes_to_provider() {
     let app = app(Arc::new(Registry::with_default_alias()));
     let response = app

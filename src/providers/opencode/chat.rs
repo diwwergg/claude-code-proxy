@@ -415,18 +415,26 @@ struct PromptTokensDetails {
 }
 
 impl Usage {
-    fn anthropic(&self) -> Value {
+    fn anthropic(&self, estimated_input_tokens: u64, fallback_output_tokens: u64) -> Value {
         let cached = self
             .prompt_tokens_details
             .as_ref()
             .and_then(|details| details.cached_tokens)
             .or(self.cached_tokens)
             .unwrap_or(0);
+        let input_tokens = self
+            .prompt_tokens
+            .unwrap_or(estimated_input_tokens)
+            .saturating_sub(cached);
+        let output_tokens = self
+            .completion_tokens
+            .filter(|tokens| *tokens > 0)
+            .unwrap_or(fallback_output_tokens);
         json!({
-            "input_tokens":self.prompt_tokens.unwrap_or(0).saturating_sub(cached),
-            "output_tokens":self.completion_tokens.unwrap_or(0),
-            "cache_creation_input_tokens":0,
-            "cache_read_input_tokens":cached,
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "cache_creation_input_tokens": 0,
+            "cache_read_input_tokens": cached,
         })
     }
 }
@@ -536,10 +544,19 @@ struct TranslationState {
     tools: Vec<ToolSlot>,
     pending_stop: Option<StopReason>,
     usage: Usage,
+    estimated_input_tokens: u64,
 }
 
 impl TranslationState {
     fn new(message_id: String, model: String) -> Self {
+        Self::with_estimated_input_tokens(message_id, model, 0)
+    }
+
+    fn with_estimated_input_tokens(
+        message_id: String,
+        model: String,
+        estimated_input_tokens: u64,
+    ) -> Self {
         Self {
             message_id,
             model,
@@ -552,6 +569,7 @@ impl TranslationState {
             tools: Vec::new(),
             pending_stop: None,
             usage: Usage::default(),
+            estimated_input_tokens,
         }
     }
 
@@ -827,14 +845,34 @@ impl TranslationState {
                 StopReason::ToolUse
             }
         });
+        let generated_output = self.estimated_output_tokens();
         emit(
             &mut out,
             "message_delta",
-            json!({"type":"message_delta","delta":{"stop_reason":stop.anthropic(),"stop_sequence":null},"usage":self.usage.anthropic()}),
+            json!({"type":"message_delta","delta":{"stop_reason":stop.anthropic(),"stop_sequence":null},"usage":self.usage.anthropic(self.estimated_input_tokens, generated_output)}),
         );
         emit(&mut out, "message_stop", json!({"type":"message_stop"}));
         self.finished = true;
         Ok(out)
+    }
+
+    fn estimated_output_tokens(&self) -> u64 {
+        let mut total = 0u64;
+        for block in &self.blocks {
+            match &block.kind {
+                BlockKind::Thinking { text } => {
+                    total += crate::providers::kimi::count_tokens::approx_token_count(text);
+                }
+                BlockKind::Text { text } => {
+                    total += crate::providers::kimi::count_tokens::approx_token_count(text);
+                }
+                BlockKind::Tool { name, args, .. } => {
+                    total += crate::providers::kimi::count_tokens::approx_token_count(name);
+                    total += crate::providers::kimi::count_tokens::approx_token_count(args);
+                }
+            }
+        }
+        total
     }
 
     fn response(&self) -> anyhow::Result<Value> {
@@ -871,6 +909,7 @@ impl TranslationState {
                 StopReason::ToolUse
             }
         });
+        let generated_output = self.estimated_output_tokens();
         Ok(json!({
             "id":self.message_id,
             "type":"message",
@@ -879,7 +918,7 @@ impl TranslationState {
             "content":content,
             "stop_reason":stop.anthropic(),
             "stop_sequence":null,
-            "usage":self.usage.anthropic(),
+            "usage":self.usage.anthropic(self.estimated_input_tokens, generated_output),
         }))
     }
 
@@ -890,7 +929,7 @@ impl TranslationState {
         emit(
             out,
             "message_start",
-            json!({"type":"message_start","message":{"id":self.message_id,"type":"message","role":"assistant","model":self.model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":0,"output_tokens":0}}}),
+            json!({"type":"message_start","message":{"id":self.message_id,"type":"message","role":"assistant","model":self.model,"content":[],"stop_reason":null,"stop_sequence":null,"usage":{"input_tokens":self.estimated_input_tokens,"output_tokens":0}}}),
         );
         self.message_started = true;
     }
@@ -978,9 +1017,21 @@ pub struct LiveStreamTranslator {
 
 impl LiveStreamTranslator {
     pub fn new(message_id: String, model: String) -> Self {
+        Self::with_estimated_input_tokens(message_id, model, 0)
+    }
+
+    pub fn with_estimated_input_tokens(
+        message_id: String,
+        model: String,
+        estimated_input_tokens: u64,
+    ) -> Self {
         Self {
             decoder: SseDecoder::default(),
-            state: TranslationState::new(message_id, model),
+            state: TranslationState::with_estimated_input_tokens(
+                message_id,
+                model,
+                estimated_input_tokens,
+            ),
         }
     }
 
@@ -1127,6 +1178,18 @@ where
                         return Some(self.fail_at("capture", "incomplete_stream"));
                     }
                     self.terminal = true;
+                    if !output.is_empty() {
+                        let (input_tokens, output_tokens) = usage_from_anthropic_sse(&output);
+                        if let Some(monitor) = self.monitor.as_ref() {
+                            monitor.stream_progress(
+                                &self.req_id,
+                                output.len() as u64,
+                                count_sse_events(&output),
+                                input_tokens,
+                                output_tokens,
+                            );
+                        }
+                    }
                     self.capture_downstream(&output);
                     self.finish_capture(true);
                     return (!output.is_empty()).then_some(output);

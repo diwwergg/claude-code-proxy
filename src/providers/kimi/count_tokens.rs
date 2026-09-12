@@ -111,7 +111,7 @@ fn count_tool_tokens(tools: &[serde_json::Value]) -> u64 {
     total
 }
 
-fn approx_token_count(text: &str) -> u64 {
+pub fn approx_token_count(text: &str) -> u64 {
     if text.is_empty() {
         return 0;
     }

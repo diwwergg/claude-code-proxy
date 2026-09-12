@@ -140,9 +140,19 @@ fn shape_native_request(body: &mut Value) -> Result<NativeResolved, Response> {
 }
 
 fn resolve_native_model(requested: &str) -> (String, bool) {
-    let (requested, priority) = match requested.strip_suffix("-fast") {
+    let un_hinted = if let Some(open) = requested.rfind('[') {
+        if requested.ends_with(']') && open < requested.len() - 1 {
+            &requested[..open]
+        } else {
+            requested
+        }
+    } else {
+        requested
+    };
+    let un_prefixed = un_hinted.strip_prefix("openai:").unwrap_or(un_hinted);
+    let (requested, priority) = match un_prefixed.strip_suffix("-fast") {
         Some(base) if ALLOWED_MODELS.contains(&base) => (base, true),
-        _ => (requested, false),
+        _ => (un_prefixed, false),
     };
     let model = MODEL_ALIASES
         .iter()

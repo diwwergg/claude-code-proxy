@@ -14,32 +14,38 @@ fn models_advertise_copilot_namespace_without_gpt_fast_duplicates() {
 
 #[test]
 fn github_copilot_help_exposes_auth_copy_and_models() {
-    let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
-    cmd.args(["github-copilot", "--help"])
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("auth"))
-        .stdout(predicate::str::contains("copy"))
-        .stdout(predicate::str::contains("models"));
+    for binary_arg in ["github-copilot", "copilot"] {
+        let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
+        cmd.args([binary_arg, "--help"])
+            .assert()
+            .success()
+            .stdout(predicate::str::contains("auth"))
+            .stdout(predicate::str::contains("copy"))
+            .stdout(predicate::str::contains("models"));
+    }
 }
 
 #[test]
 fn github_copilot_copy_sources_parse_without_reaching_io() {
-    for source in ["vscode", "opencode"] {
-        let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
-        cmd.args(["github-copilot", "copy", source, "--help"])
-            .assert()
-            .success();
+    for cmd_name in ["github-copilot", "copilot"] {
+        for source in ["vscode", "opencode"] {
+            let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
+            cmd.args([cmd_name, "copy", source, "--help"])
+                .assert()
+                .success();
+        }
     }
 }
 
 #[test]
 fn github_copilot_copy_rejects_unknown_source_at_cli_layer() {
-    let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
-    cmd.args(["github-copilot", "copy", "unknown"])
-        .assert()
-        .failure()
-        .stderr(predicate::str::contains("invalid value"));
+    for cmd_name in ["github-copilot", "copilot"] {
+        let mut cmd = Command::cargo_bin("claude-code-proxy").unwrap();
+        cmd.args([cmd_name, "copy", "unknown"])
+            .assert()
+            .failure()
+            .stderr(predicate::str::contains("invalid value"));
+    }
 }
 
 #[test]

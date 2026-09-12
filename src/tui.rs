@@ -635,6 +635,7 @@ fn provider_cell(value: Option<&str>) -> Cell<'static> {
         "codex" => TEAL,
         "kimi" => Color::Rgb(190, 150, 220),
         "cursor" => Color::Rgb(140, 170, 230),
+        "copilot" | "github-copilot" => Color::Rgb(100, 200, 255),
         "-" => DIM,
         _ => DIM_WHITE,
     };

@@ -23,6 +23,7 @@ use crate::{
         error::json_error,
         schema::{CountTokensResponse, MessagesRequest},
     },
+    monitor::{MonitorHandle, usage_from_anthropic_sse},
     provider::{
         CliHandlers, Generation, GenerationBody, Provider, ProviderError, ProviderErrorKind,
         RequestContext,
@@ -44,6 +45,7 @@ const ACCESS_TOKEN_URL: &str = "https://github.com/login/oauth/access_token";
 const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/token";
 const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 const PREFIX: &str = "github-copilot:";
+const COPILOT_PREFIX: &str = "copilot:";
 const FALLBACK_MODELS: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
@@ -123,16 +125,18 @@ impl Default for GithubCopilotProvider {
 }
 
 pub fn advertised_models() -> Vec<String> {
-    FALLBACK_MODELS
-        .iter()
-        .map(|m| format!("{PREFIX}{m}"))
-        .collect()
+    let mut models = Vec::new();
+    for m in FALLBACK_MODELS {
+        models.push(format!("{COPILOT_PREFIX}{m}"));
+        models.push(format!("{PREFIX}{m}"));
+    }
+    models
 }
 
 #[async_trait]
 impl Provider for GithubCopilotProvider {
     fn name(&self) -> &'static str {
-        "github-copilot"
+        "copilot"
     }
     fn supported_models(&self) -> Vec<String> {
         advertised_models()
@@ -168,7 +172,16 @@ impl Provider for GithubCopilotProvider {
             WireApi::Responses => responses::accumulate_response(&bytes, &id, &requested),
         };
         match translated {
-            Ok(value) => (StatusCode::OK, Json(value)).into_response(),
+            Ok(value) => {
+                if let Some(m) = ctx.monitor.as_ref() {
+                    m.usage_updated(
+                        &ctx.req_id,
+                        value.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
+                        value.pointer("/usage/output_tokens").and_then(|v| v.as_u64()),
+                    );
+                }
+                (StatusCode::OK, Json(value)).into_response()
+            }
             Err(e) => json_error(
                 StatusCode::BAD_GATEWAY,
                 "api_error",
@@ -203,12 +216,32 @@ impl Provider for GithubCopilotProvider {
             .unwrap_or_else(|| format!("{PREFIX}gpt-5.4"));
         let model = normalize_model(&requested);
         let wire = WireApi::for_model(&model);
+        let estimated_input_tokens = count_tokens::count_tokens(&body);
+        if let Some(m) = ctx.monitor.as_ref() {
+            m.usage_updated(&ctx.req_id, Some(estimated_input_tokens), None);
+        }
         let response = send_upstream(&body, &ctx, &model, wire).await?;
         let id = format!("msg_{}", uuid::Uuid::new_v4().simple());
         let upstream = Box::pin(response.bytes_stream());
         let body = match wire {
-            WireApi::Chat => chat_stream(upstream, id, requested, ctx.traffic.clone()),
-            WireApi::Responses => responses_stream(upstream, id, requested, ctx.traffic.clone()),
+            WireApi::Chat => chat_stream(
+                upstream,
+                id,
+                requested,
+                estimated_input_tokens,
+                ctx.monitor.clone(),
+                ctx.req_id.clone(),
+                ctx.traffic.clone(),
+            ),
+            WireApi::Responses => responses_stream(
+                upstream,
+                id,
+                requested,
+                estimated_input_tokens,
+                ctx.monitor.clone(),
+                ctx.req_id.clone(),
+                ctx.traffic.clone(),
+            ),
         };
         Ok(Generation {
             body: GenerationBody::LiveSse(body),
@@ -301,21 +334,36 @@ async fn send_upstream(
     Err(error)
 }
 
+fn count_sse_events(bytes: &[u8]) -> u64 {
+    String::from_utf8_lossy(bytes).matches("event:").count() as u64
+}
+
 fn chat_stream(
     upstream: Upstream,
     id: String,
     model: String,
+    estimated_input_tokens: u64,
+    monitor: Option<MonitorHandle>,
+    req_id: String,
     traffic: Option<Arc<TrafficCapture>>,
 ) -> Body {
     struct State {
         upstream: Upstream,
         translator: chat::LiveStreamTranslator,
+        monitor: Option<MonitorHandle>,
+        req_id: String,
+        bytes: u64,
+        chunks: u64,
         done: bool,
         traffic: Option<Arc<TrafficCapture>>,
     }
     let state = State {
         upstream,
-        translator: chat::LiveStreamTranslator::new(id, model),
+        translator: chat::LiveStreamTranslator::with_estimated_input_tokens(id, model, estimated_input_tokens),
+        monitor,
+        req_id,
+        bytes: 0,
+        chunks: 0,
         done: false,
         traffic,
     };
@@ -329,8 +377,23 @@ fn chat_stream(
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
                     }
+                    if s.bytes == 0 && let Some(m) = s.monitor.as_ref() {
+                        m.generation_started(&s.req_id);
+                    }
+                    s.bytes = s.bytes.saturating_add(chunk.len() as u64);
+                    s.chunks = s.chunks.saturating_add(1);
                     match s.translator.push(&chunk) {
                         Ok(out) if !out.is_empty() => {
+                            let (input_tokens, output_tokens) = usage_from_anthropic_sse(&out);
+                            if let Some(m) = s.monitor.as_ref() {
+                                m.stream_progress(
+                                    &s.req_id,
+                                    out.len() as u64,
+                                    count_sse_events(&out),
+                                    input_tokens,
+                                    output_tokens,
+                                );
+                            }
                             return Some((Ok::<Bytes, Infallible>(Bytes::from(out)), s));
                         }
                         Ok(_) => continue,
@@ -359,6 +422,18 @@ fn chat_stream(
                     let out = s.translator.finish().unwrap_or_else(|e| {
                         chat::stream_error(&format!("Copilot stream ended unexpectedly: {e}"))
                     });
+                    if !out.is_empty() {
+                        let (input_tokens, output_tokens) = usage_from_anthropic_sse(&out);
+                        if let Some(m) = s.monitor.as_ref() {
+                            m.stream_progress(
+                                &s.req_id,
+                                out.len() as u64,
+                                count_sse_events(&out),
+                                input_tokens,
+                                output_tokens,
+                            );
+                        }
+                    }
                     return (!out.is_empty()).then(|| (Ok(Bytes::from(out)), s));
                 }
             }
@@ -370,20 +445,31 @@ fn responses_stream(
     upstream: Upstream,
     id: String,
     model: String,
+    estimated_input_tokens: u64,
+    monitor: Option<MonitorHandle>,
+    req_id: String,
     traffic: Option<Arc<TrafficCapture>>,
 ) -> Body {
     struct State {
         upstream: Upstream,
         decoder: SseDecoder,
         translator: ResponsesTranslator,
+        monitor: Option<MonitorHandle>,
+        req_id: String,
+        bytes: u64,
+        chunks: u64,
         done: bool,
         traffic: Option<Arc<TrafficCapture>>,
     }
     let state = State {
         upstream,
         decoder: SseDecoder::default(),
-        translator: ResponsesTranslator::new(id, model)
+        translator: ResponsesTranslator::with_estimated_input_tokens(id, model, estimated_input_tokens)
             .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens),
+        monitor,
+        req_id,
+        bytes: 0,
+        chunks: 0,
         done: false,
         traffic,
     };
@@ -397,6 +483,11 @@ fn responses_stream(
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
                     }
+                    if s.bytes == 0 && let Some(m) = s.monitor.as_ref() {
+                        m.generation_started(&s.req_id);
+                    }
+                    s.bytes = s.bytes.saturating_add(chunk.len() as u64);
+                    s.chunks = s.chunks.saturating_add(1);
                     let events = match s.decoder.push(&chunk) {
                         Ok(v) => v,
                         Err(e) => {
@@ -443,6 +534,16 @@ fn responses_stream(
                         s.done = true;
                     }
                     if !out.is_empty() {
+                        let (input_tokens, output_tokens) = usage_from_anthropic_sse(&out);
+                        if let Some(m) = s.monitor.as_ref() {
+                            m.stream_progress(
+                                &s.req_id,
+                                out.len() as u64,
+                                count_sse_events(&out),
+                                input_tokens,
+                                output_tokens,
+                            );
+                        }
                         return Some((Ok(Bytes::from(out)), s));
                     }
                     if s.done {
@@ -466,6 +567,18 @@ fn responses_stream(
                             "api_error",
                             s.traffic.as_deref(),
                         );
+                        if !out.is_empty() {
+                            let (input_tokens, output_tokens) = usage_from_anthropic_sse(&out);
+                            if let Some(m) = s.monitor.as_ref() {
+                                m.stream_progress(
+                                    &s.req_id,
+                                    out.len() as u64,
+                                    count_sse_events(&out),
+                                    input_tokens,
+                                    output_tokens,
+                                );
+                            }
+                        }
                         return (!out.is_empty()).then(|| (Ok(Bytes::from(out)), s));
                     }
                     return None;
@@ -521,7 +634,10 @@ fn error_response(error: ProviderError) -> Response {
 }
 
 fn normalize_model(model: &str) -> String {
-    let id = model.strip_prefix(PREFIX).unwrap_or(model);
+    let id = model
+        .strip_prefix(PREFIX)
+        .or_else(|| model.strip_prefix(COPILOT_PREFIX))
+        .unwrap_or(model);
     if id.starts_with("gpt-") {
         id.strip_suffix("-fast").unwrap_or(id).to_string()
     } else {
@@ -556,7 +672,15 @@ fn user_agent() -> String {
     )
 }
 fn auth_path() -> PathBuf {
-    crate::paths::provider_auth_file("github-copilot")
+    let copilot_file = crate::paths::provider_auth_file("copilot");
+    if copilot_file.exists() {
+        return copilot_file;
+    }
+    let legacy_file = crate::paths::provider_auth_file("github-copilot");
+    if legacy_file.exists() {
+        return legacy_file;
+    }
+    copilot_file
 }
 
 fn load_auth() -> anyhow::Result<StoredAuth> {
@@ -882,6 +1006,10 @@ mod tests {
     fn gpt_fast_is_alias_only() {
         assert_eq!(
             normalize_model("github-copilot:gpt-5.6-sol-fast"),
+            "gpt-5.6-sol"
+        );
+        assert_eq!(
+            normalize_model("copilot:gpt-5.6-sol-fast"),
             "gpt-5.6-sol"
         );
         assert!(advertised_models().iter().all(|m| !m.ends_with("-fast")));

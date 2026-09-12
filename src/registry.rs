@@ -25,7 +25,9 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
 ];
 
 pub const CURSOR_PREFIXES: &[&str] = &["cursor:", "cursor-plan:", "cursor-ask:"];
+pub const COPILOT_PREFIX: &str = "copilot:";
 pub const GITHUB_COPILOT_PREFIX: &str = "github-copilot:";
+pub const OPENAI_PREFIX: &str = "openai:";
 
 const CURSOR_LEGACY_MODELS: &[&str] = &[
     "cursor",
@@ -65,10 +67,11 @@ impl Registry {
         let mut models: BTreeMap<String, Vec<String>> = BTreeMap::new();
         // GPT -fast names are no longer advertised separately. Incoming legacy
         // names are normalized by normalize_incoming_model().
-        models.insert(
-            "codex".into(),
-            CODEX_MODELS.iter().map(|m| (*m).to_string()).collect(),
-        );
+        let mut codex_models: Vec<String> = CODEX_MODELS.iter().map(|m| (*m).to_string()).collect();
+        for m in CODEX_MODELS {
+            codex_models.push(format!("{OPENAI_PREFIX}{m}"));
+        }
+        models.insert("codex".into(), codex_models);
         models.insert(
             "kimi".into(),
             KIMI_MODELS.iter().map(|m| (*m).to_string()).collect(),
@@ -82,10 +85,9 @@ impl Registry {
             "opencode".into(),
             crate::providers::opencode::advertised_models(),
         );
-        models.insert(
-            "github-copilot".into(),
-            crate::providers::github_copilot::advertised_models(),
-        );
+        let copilot_models = crate::providers::github_copilot::advertised_models();
+        models.insert("copilot".into(), copilot_models.clone());
+        models.insert("github-copilot".into(), copilot_models);
 
         let mut handlers = BTreeMap::new();
         for (name, entries) in &models {
@@ -95,7 +97,7 @@ impl Registry {
                 "cursor" => Arc::new(crate::providers::cursor::CursorProvider::new()),
                 "grok" => Arc::new(crate::providers::grok::GrokProvider::new()),
                 "opencode" => Arc::new(crate::providers::opencode::OpenCodeProvider::new()),
-                "github-copilot" => {
+                "copilot" | "github-copilot" => {
                     Arc::new(crate::providers::github_copilot::GithubCopilotProvider::new())
                 }
                 _ => Arc::new(PlaceholderProvider::new(name, entries.clone())),
@@ -178,8 +180,11 @@ impl Registry {
         session_affinity: Option<&AliasProvider>,
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
-        if normalized.starts_with(GITHUB_COPILOT_PREFIX) {
-            return self.handlers.get("github-copilot").cloned();
+        if normalized.starts_with(COPILOT_PREFIX) || normalized.starts_with(GITHUB_COPILOT_PREFIX) {
+            return self.handlers.get("copilot").or_else(|| self.handlers.get("github-copilot")).cloned();
+        }
+        if normalized.starts_with(OPENAI_PREFIX) {
+            return self.handlers.get("codex").cloned();
         }
         if is_anthropic_alias(&normalized) {
             let target = session_affinity.unwrap_or(&self.alias_provider);
@@ -207,10 +212,12 @@ impl Registry {
 }
 
 pub fn normalize_incoming_model(model: &str) -> String {
-    let hint = "[1m]";
-    let mut normalized = if model.len() >= hint.len() && model.to_ascii_lowercase().ends_with(hint)
-    {
-        model[..model.len() - hint.len()].to_string()
+    let mut normalized = if let Some(open) = model.rfind('[') {
+        if model.ends_with(']') && open < model.len() - 1 {
+            model[..open].to_string()
+        } else {
+            model.to_string()
+        }
     } else {
         model.to_string()
     };
@@ -218,11 +225,17 @@ pub fn normalize_incoming_model(model: &str) -> String {
     // Do not touch non-GPT names such as cursor-composer-fast or grok-*-fast.
     let bare = normalized
         .strip_prefix(GITHUB_COPILOT_PREFIX)
+        .or_else(|| normalized.strip_prefix(COPILOT_PREFIX))
+        .or_else(|| normalized.strip_prefix(OPENAI_PREFIX))
         .unwrap_or(&normalized);
     if bare.starts_with("gpt-") && bare.ends_with("-fast") {
         let collapsed = bare.trim_end_matches("-fast");
         normalized = if normalized.starts_with(GITHUB_COPILOT_PREFIX) {
             format!("{GITHUB_COPILOT_PREFIX}{collapsed}")
+        } else if normalized.starts_with(COPILOT_PREFIX) {
+            format!("{COPILOT_PREFIX}{collapsed}")
+        } else if normalized.starts_with(OPENAI_PREFIX) {
+            format!("{OPENAI_PREFIX}{collapsed}")
         } else {
             collapsed.to_string()
         };
@@ -352,6 +365,18 @@ mod tests {
             normalize_incoming_model("github-copilot:gpt-5.4-fast"),
             "github-copilot:gpt-5.4"
         );
+        assert_eq!(
+            normalize_incoming_model("copilot:gpt-5.4-fast[128k]"),
+            "copilot:gpt-5.4"
+        );
+        assert_eq!(
+            normalize_incoming_model("openai:gpt-5.4-fast[200k]"),
+            "openai:gpt-5.4"
+        );
+        assert_eq!(
+            normalize_incoming_model("openai:gpt-5.6-luna[1m]"),
+            "openai:gpt-5.6-luna"
+        );
     }
 
     #[test]
@@ -371,7 +396,20 @@ mod tests {
         let p = registry
             .provider_for_model("github-copilot:gpt-5.4-fast", None)
             .unwrap();
-        assert_eq!(p.name(), "github-copilot");
+        assert_eq!(p.name(), "copilot");
+        let p2 = registry
+            .provider_for_model("copilot:gpt-5.4-fast", None)
+            .unwrap();
+        assert_eq!(p2.name(), "copilot");
+    }
+
+    #[test]
+    fn openai_prefix_routes_to_codex() {
+        let registry = Registry::new(AliasProvider::Kimi);
+        let p = registry
+            .provider_for_model("openai:gpt-5.6-luna[1m]", None)
+            .unwrap();
+        assert_eq!(p.name(), "codex");
     }
 
     #[test]
