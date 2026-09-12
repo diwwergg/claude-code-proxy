@@ -181,7 +181,11 @@ impl Registry {
     ) -> Option<Arc<dyn Provider>> {
         let normalized = normalize_incoming_model(raw_model);
         if normalized.starts_with(COPILOT_PREFIX) || normalized.starts_with(GITHUB_COPILOT_PREFIX) {
-            return self.handlers.get("copilot").or_else(|| self.handlers.get("github-copilot")).cloned();
+            return self
+                .handlers
+                .get("copilot")
+                .or_else(|| self.handlers.get("github-copilot"))
+                .cloned();
         }
         if normalized.starts_with(OPENAI_PREFIX) {
             return self.handlers.get("codex").cloned();

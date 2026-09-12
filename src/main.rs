@@ -374,8 +374,8 @@ mod tests {
                 }
             })
         ));
-        let cli_copilot = Cli::try_parse_from(["claude-code-proxy", "copilot", "copy", "opencode"])
-            .unwrap();
+        let cli_copilot =
+            Cli::try_parse_from(["claude-code-proxy", "copilot", "copy", "opencode"]).unwrap();
         assert!(matches!(
             cli_copilot.command,
             Some(Commands::GithubCopilot {

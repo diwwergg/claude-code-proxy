@@ -682,8 +682,8 @@ async fn context_window_hint_is_removed_before_provider_dispatch() {
 
 #[tokio::test]
 async fn openai_prefix_and_context_size_routes_to_codex() {
-    let app = app(Arc::new(Registry::with_default_alias()));
-    let response = app
+    let router = app(Arc::new(Registry::with_default_alias()));
+    let response = router
         .oneshot(
             Request::builder()
                 .method(Method::POST)

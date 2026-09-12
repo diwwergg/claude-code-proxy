@@ -548,10 +548,6 @@ struct TranslationState {
 }
 
 impl TranslationState {
-    fn new(message_id: String, model: String) -> Self {
-        Self::with_estimated_input_tokens(message_id, model, 0)
-    }
-
     fn with_estimated_input_tokens(
         message_id: String,
         model: String,

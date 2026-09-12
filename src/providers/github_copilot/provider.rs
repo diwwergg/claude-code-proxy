@@ -176,8 +176,12 @@ impl Provider for GithubCopilotProvider {
                 if let Some(m) = ctx.monitor.as_ref() {
                     m.usage_updated(
                         &ctx.req_id,
-                        value.pointer("/usage/input_tokens").and_then(|v| v.as_u64()),
-                        value.pointer("/usage/output_tokens").and_then(|v| v.as_u64()),
+                        value
+                            .pointer("/usage/input_tokens")
+                            .and_then(|v| v.as_u64()),
+                        value
+                            .pointer("/usage/output_tokens")
+                            .and_then(|v| v.as_u64()),
                     );
                 }
                 (StatusCode::OK, Json(value)).into_response()
@@ -359,7 +363,11 @@ fn chat_stream(
     }
     let state = State {
         upstream,
-        translator: chat::LiveStreamTranslator::with_estimated_input_tokens(id, model, estimated_input_tokens),
+        translator: chat::LiveStreamTranslator::with_estimated_input_tokens(
+            id,
+            model,
+            estimated_input_tokens,
+        ),
         monitor,
         req_id,
         bytes: 0,
@@ -377,7 +385,9 @@ fn chat_stream(
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
                     }
-                    if s.bytes == 0 && let Some(m) = s.monitor.as_ref() {
+                    if s.bytes == 0
+                        && let Some(m) = s.monitor.as_ref()
+                    {
                         m.generation_started(&s.req_id);
                     }
                     s.bytes = s.bytes.saturating_add(chunk.len() as u64);
@@ -464,8 +474,12 @@ fn responses_stream(
     let state = State {
         upstream,
         decoder: SseDecoder::default(),
-        translator: ResponsesTranslator::with_estimated_input_tokens(id, model, estimated_input_tokens)
-            .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens),
+        translator: ResponsesTranslator::with_estimated_input_tokens(
+            id,
+            model,
+            estimated_input_tokens,
+        )
+        .with_incomplete_response_policy(IncompleteResponsePolicy::AllowMaxOutputTokens),
         monitor,
         req_id,
         bytes: 0,
@@ -483,7 +497,9 @@ fn responses_stream(
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
                     }
-                    if s.bytes == 0 && let Some(m) = s.monitor.as_ref() {
+                    if s.bytes == 0
+                        && let Some(m) = s.monitor.as_ref()
+                    {
                         m.generation_started(&s.req_id);
                     }
                     s.bytes = s.bytes.saturating_add(chunk.len() as u64);
@@ -1008,10 +1024,7 @@ mod tests {
             normalize_model("github-copilot:gpt-5.6-sol-fast"),
             "gpt-5.6-sol"
         );
-        assert_eq!(
-            normalize_model("copilot:gpt-5.6-sol-fast"),
-            "gpt-5.6-sol"
-        );
+        assert_eq!(normalize_model("copilot:gpt-5.6-sol-fast"), "gpt-5.6-sol");
         assert!(advertised_models().iter().all(|m| !m.ends_with("-fast")));
     }
     #[test]
