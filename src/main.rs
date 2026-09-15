@@ -32,6 +32,11 @@ enum Commands {
         #[arg(long = "no-monitor", action = ArgAction::SetTrue)]
         no_monitor: bool,
     },
+    /// Attach a read-only dashboard to a running proxy
+    Monitor {
+        #[arg(long)]
+        url: Option<reqwest::Url>,
+    },
     /// Open the monitor TUI with mock data and no proxy server
     #[command(hide = true)]
     Demo,
@@ -122,10 +127,90 @@ fn main() -> Result<()> {
             println!("claude-code-proxy {}", VERSION);
             Ok(())
         }
-        Commands::Serve { port, no_monitor } => run_server(port, no_monitor),
+
+        Commands::Serve { port, no_monitor } => {
+            let bind_address = config::bind_address();
+            let effective_port = port.unwrap_or_else(config::port);
+            let registry = Registry::with_default_alias();
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
+                ServeMode::Plain => {
+                    print_server_banner(&bind_address, effective_port, &registry);
+                    runtime
+                        .block_on(run_service(ServerConfig {
+                            bind_address,
+                            port: effective_port,
+                            monitor: Some(MonitorHandle::default()),
+                        }))
+                        .map_err(|err| anyhow::anyhow!(err))
+                }
+                ServeMode::Monitor => {
+                    let _stderr_guard = logging::suppress_stderr();
+                    let monitor = MonitorHandle::default();
+                    let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
+                    let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
+                    let listener = runtime
+                        .block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
+                    let local_addr = listener.local_addr()?;
+                    let monitor_listen_url =
+                        listen_url(&local_addr.ip().to_string(), local_addr.port());
+                    let server_monitor = monitor.clone();
+                    let server_task = runtime.spawn(async move {
+                        let result =
+                            server::serve_listener(listener, Some(server_monitor), async move {
+                                let _ = shutdown_rx.await;
+                            })
+                            .await;
+                        let _ = shutdown_complete_tx.send(());
+                        result
+                    });
+                    let ui_result = tui::run_monitor(
+                        monitor,
+                        MonitorUiConfig {
+                            listen_url: monitor_listen_url,
+                            port: effective_port,
+                            registry: &registry,
+                            shutdown: Some(shutdown_tx),
+                            shutdown_complete: Some(shutdown_complete_rx),
+                        },
+                    );
+                    if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
+                        server_task.abort();
+                        let _ = runtime.block_on(server_task);
+                        std::process::exit(130);
+                    }
+                    let server_result = runtime.block_on(server_task)?;
+                    ui_result?;
+                    server_result.map_err(|err| anyhow::anyhow!(err))
+                }
+            }
+        }
+
         Commands::Demo => {
             let registry = Registry::with_default_alias();
             tui::run_mock_monitor(config::port(), &registry)
+        }
+        Commands::Monitor { url } => {
+            let url = url.unwrap_or_else(|| {
+                format!("http://127.0.0.1:{}", config::port())
+                    .parse()
+                    .expect("local proxy URL")
+            });
+            let runtime = tokio::runtime::Builder::new_multi_thread()
+                .enable_all()
+                .build()?;
+            let client = reqwest::Client::builder()
+                .no_proxy()
+                .redirect(reqwest::redirect::Policy::none())
+                .timeout(std::time::Duration::from_secs(2))
+                .build()?;
+            let monitor = runtime.block_on(
+                claude_code_proxy::monitor::remote::RemoteMonitor::connect(client, url.clone()),
+            )?;
+            tui::run_attached_monitor(|| monitor.snapshot(), url.to_string())?;
+            Ok(())
         }
         Commands::Models { full } => {
             print_models(&Registry::with_default_alias(), full);
@@ -139,58 +224,82 @@ fn main() -> Result<()> {
     }
 }
 
-fn run_server(port: Option<u16>, no_monitor: bool) -> Result<()> {
-    let bind_address = config::bind_address();
-    let effective_port = port.unwrap_or_else(config::port);
-    let registry = Registry::with_default_alias();
-    let runtime = tokio::runtime::Builder::new_multi_thread()
-        .enable_all()
-        .build()?;
-    match select_serve_mode(std::io::stdout().is_terminal(), no_monitor) {
-        ServeMode::Plain => {
-            print_server_banner(&bind_address, effective_port, &registry);
-            runtime.block_on(server::serve(ServerConfig {
-                bind_address,
-                port: effective_port,
-                monitor: None,
-            }))
-        }
-        ServeMode::Monitor => {
-            let _stderr_guard = logging::suppress_stderr();
-            let monitor = MonitorHandle::default();
-            let (shutdown_tx, shutdown_rx) = tokio::sync::oneshot::channel();
-            let (shutdown_complete_tx, shutdown_complete_rx) = std::sync::mpsc::channel();
-            let listener =
-                runtime.block_on(server::bind_proxy_listener(&bind_address, effective_port))?;
-            let local_addr = listener.local_addr()?;
-            let server_monitor = monitor.clone();
-            let server_task = runtime.spawn(async move {
-                let result = server::serve_listener(listener, Some(server_monitor), async move {
-                    let _ = shutdown_rx.await;
-                })
-                .await;
-                let _ = shutdown_complete_tx.send(());
-                result
-            });
-            let ui_result = tui::run_monitor(
-                monitor,
-                MonitorUiConfig {
-                    listen_url: listen_url(&local_addr.ip().to_string(), local_addr.port()),
-                    port: effective_port,
-                    registry: &registry,
-                    shutdown: Some(shutdown_tx),
-                    shutdown_complete: Some(shutdown_complete_rx),
-                },
-            );
-            if matches!(&ui_result, Ok(MonitorExit::ForceQuit)) {
-                server_task.abort();
-                let _ = runtime.block_on(server_task);
-                std::process::exit(130);
+async fn run_service(config: ServerConfig) -> Result<()> {
+    let mut signals = ServiceShutdownSignals::new()?;
+    let (shutdown, stopped) = tokio::sync::oneshot::channel();
+    let server = server::serve_with_shutdown(config, async {
+        let _ = stopped.await;
+    });
+    tokio::pin!(server);
+    tokio::select! {
+        result = &mut server => result,
+        signal = signals.recv() => {
+            signal?;
+            let _ = shutdown.send(());
+            tokio::select! {
+                result = &mut server => result,
+                signal = signals.recv() => {
+                    signal?;
+                    std::process::exit(130);
+                }
             }
-            let server_result = runtime.block_on(server_task)?;
-            ui_result?;
-            server_result
         }
+    }
+}
+
+#[cfg(unix)]
+struct ServiceShutdownSignals {
+    interrupt: tokio::signal::unix::Signal,
+    terminate: tokio::signal::unix::Signal,
+}
+
+#[cfg(unix)]
+impl ServiceShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            interrupt: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::interrupt())?,
+            terminate: tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())?,
+        })
+    }
+
+    async fn recv(&mut self) -> std::io::Result<()> {
+        tokio::select! {
+            _ = self.interrupt.recv() => Ok(()),
+            _ = self.terminate.recv() => Ok(()),
+        }
+    }
+}
+
+#[cfg(windows)]
+struct ServiceShutdownSignals {
+    ctrl_c: tokio::signal::windows::CtrlC,
+}
+
+#[cfg(windows)]
+impl ServiceShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self {
+            ctrl_c: tokio::signal::windows::ctrl_c()?,
+        })
+    }
+
+    async fn recv(&mut self) -> std::io::Result<()> {
+        let _ = self.ctrl_c.recv().await;
+        Ok(())
+    }
+}
+
+#[cfg(not(any(unix, windows)))]
+struct ServiceShutdownSignals;
+
+#[cfg(not(any(unix, windows)))]
+impl ServiceShutdownSignals {
+    fn new() -> std::io::Result<Self> {
+        Ok(Self)
+    }
+
+    async fn recv(&mut self) -> std::io::Result<()> {
+        tokio::signal::ctrl_c().await
     }
 }
 
@@ -362,6 +471,7 @@ mod tests {
         let cli = Cli::try_parse_from(["claude-code-proxy", "demo"]).unwrap();
         assert!(matches!(cli.command, Some(Commands::Demo)));
     }
+
     #[test]
     fn github_copilot_copy_cli_parses() {
         let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "copy", "opencode"])
@@ -408,6 +518,18 @@ mod tests {
             })
         ));
     }
+
+    #[tokio::test]
+    async fn shutdown_signal_setup_and_receive_preserve_io_results() {
+        fn assert_constructor(_: fn() -> std::io::Result<ServiceShutdownSignals>) {}
+        fn assert_io_future<F: std::future::Future<Output = std::io::Result<()>>>(_: &F) {}
+
+        assert_constructor(ServiceShutdownSignals::new);
+        let mut signals = ServiceShutdownSignals::new().unwrap();
+        let receive = signals.recv();
+        assert_io_future(&receive);
+    }
+
     #[test]
     fn listen_url_brackets_ipv6_addresses() {
         assert_eq!(listen_url("::1", 18765), "http://[::1]:18765");
