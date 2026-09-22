@@ -56,6 +56,7 @@ const FALLBACK_MODELS: &[&str] = &[
     "claude-sonnet-4.6",
     "claude-opus-4.7",
     "gemini-3.5-pro",
+    "gemini-3.8-flash",
 ];
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
