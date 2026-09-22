@@ -1,3 +1,4 @@
+use std::collections::HashMap;
 use std::convert::Infallible;
 use std::sync::Arc;
 
@@ -80,6 +81,8 @@ pub fn prepare_request(req: &MessagesRequest, model: &str) -> anyhow::Result<Cha
 
 fn build_messages(req: &MessagesRequest, model: &str) -> anyhow::Result<Vec<Value>> {
     let deepseek = model.to_ascii_lowercase().contains("deepseek");
+    let gemini = model.to_ascii_lowercase().contains("gemini");
+    let mut tool_names = HashMap::new();
     let mut system = Vec::new();
     if let Some(text) = flatten_system_text(req.extra.get("system")) {
         system.push(text);
@@ -102,8 +105,13 @@ fn build_messages(req: &MessagesRequest, model: &str) -> anyhow::Result<Vec<Valu
                     system.push(text);
                 }
             }
-            "user" => push_user_messages(&mut messages, &blocks),
+            "user" => push_user_messages(&mut messages, &blocks, gemini, &tool_names),
             "assistant" => {
+                for block in &blocks {
+                    if let ContentBlock::ToolUse { id, name, .. } = block {
+                        tool_names.insert(id.clone(), name.clone());
+                    }
+                }
                 if let Some(message) = assistant_message(&blocks, deepseek)? {
                     messages.push(message);
                 }
@@ -124,7 +132,12 @@ fn build_messages(req: &MessagesRequest, model: &str) -> anyhow::Result<Vec<Valu
     Ok(messages)
 }
 
-fn push_user_messages(messages: &mut Vec<Value>, blocks: &[ContentBlock]) {
+fn push_user_messages(
+    messages: &mut Vec<Value>,
+    blocks: &[ContentBlock],
+    gemini: bool,
+    tool_names: &HashMap<String, String>,
+) {
     let mut content = Vec::new();
     let mut tool_messages = Vec::new();
     let flush = |messages: &mut Vec<Value>, content: &mut Vec<Value>| {
@@ -161,11 +174,18 @@ fn push_user_messages(messages: &mut Vec<Value>, blocks: &[ContentBlock]) {
                 is_error,
             } => {
                 let rendered = render_tool_result(result, is_error.unwrap_or(false));
-                tool_messages.push(json!({
+                let mut message = json!({
                     "role":"tool",
                     "tool_call_id":tool_use_id,
                     "content":rendered.text,
-                }));
+                });
+                // Copilot's Gemini adapter requires the function name on
+                // replayed tool results, even though OpenAI's wire format
+                // normally permits the tool_call_id to carry that link.
+                if gemini && let Some(name) = tool_names.get(tool_use_id) {
+                    message["name"] = Value::String(name.clone());
+                }
+                tool_messages.push(message);
                 content.extend(rendered.images);
             }
             ContentBlock::Thinking { .. } | ContentBlock::ToolUse { .. } => {}
@@ -1355,6 +1375,28 @@ mod tests {
             wire["messages"][1]["tool_calls"][0]["function"]["arguments"],
             "{\"q\":\"rust\"}"
         );
+    }
+
+    #[test]
+    fn gemini_replayed_tool_results_include_the_function_name() {
+        let req = request(json!({
+            "messages":[
+                {"role":"assistant","content":[
+                    {"type":"tool_use","id":"call_1","name":"lookup","input":{"q":"rust"}}
+                ]},
+                {"role":"user","content":[
+                    {"type":"tool_result","tool_use_id":"call_1","content":"ok"}
+                ]}
+            ]
+        }));
+
+        let wire =
+            serde_json::to_value(prepare_request(&req, "gemini-3.8-flash").unwrap()).unwrap();
+        assert_eq!(wire["messages"][1]["name"], "lookup");
+
+        let non_gemini =
+            serde_json::to_value(prepare_request(&req, "claude-sonnet-4.6").unwrap()).unwrap();
+        assert!(non_gemini["messages"][1].get("name").is_none());
     }
 
     #[test]

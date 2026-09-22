@@ -472,6 +472,17 @@ mod tests {
         assert!(matches!(cli.command, Some(Commands::Demo)));
     }
 
+    #[tokio::test]
+    async fn shutdown_signal_setup_and_receive_preserve_io_results() {
+        fn assert_constructor(_: fn() -> std::io::Result<ServiceShutdownSignals>) {}
+        fn assert_io_future<F: std::future::Future<Output = std::io::Result<()>>>(_: &F) {}
+
+        assert_constructor(ServiceShutdownSignals::new);
+        let mut signals = ServiceShutdownSignals::new().unwrap();
+        let receive = signals.recv();
+        assert_io_future(&receive);
+    }
+
     #[test]
     fn github_copilot_copy_cli_parses() {
         let cli = Cli::try_parse_from(["claude-code-proxy", "github-copilot", "copy", "opencode"])
@@ -517,17 +528,6 @@ mod tests {
                 command: GithubCopilotGroup::Models
             })
         ));
-    }
-
-    #[tokio::test]
-    async fn shutdown_signal_setup_and_receive_preserve_io_results() {
-        fn assert_constructor(_: fn() -> std::io::Result<ServiceShutdownSignals>) {}
-        fn assert_io_future<F: std::future::Future<Output = std::io::Result<()>>>(_: &F) {}
-
-        assert_constructor(ServiceShutdownSignals::new);
-        let mut signals = ServiceShutdownSignals::new().unwrap();
-        let receive = signals.recv();
-        assert_io_future(&receive);
     }
 
     #[test]

@@ -1714,7 +1714,6 @@ mod tests {
             base_url,
             1_000,
             1_000,
-            0,
         );
         client
             .auth_manager()

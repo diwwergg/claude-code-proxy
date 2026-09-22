@@ -3,6 +3,27 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v1.1.41 (2026-09-22)
+
+- Merged upstream `v0.1.41` and the subsequent Grok 4.7 support.
+- GitHub Copilot requests for Gemini 3.8 Flash now include function names on
+  replayed tool results, as required by Copilot's Gemini request adapter.
+- Added `gemini-3.8-flash` to the fallback GitHub Copilot model catalog.
+
+## v0.1.41 (2026-09-19)
+
+- Long Codex requests on the HTTP transport no longer hang for minutes and then
+  fail: the proxy waits five minutes for the response headers instead of one,
+  configurable with `CCP_CODEX_HEADER_TIMEOUT_MS` or `codex.headerTimeoutMs`,
+  and a timeout there fails the request once rather than re-sending it.
+  ([#160](https://github.com/raine/claude-code-proxy/pull/160))
+- The installer correctly reports the existing version during upgrades instead
+  of showing it as unknown.
+  ([#157](https://github.com/raine/claude-code-proxy/issues/157))
+- Codex requests use the current session header for cache affinity, improving
+  compatibility with intermediaries that reject the legacy header.
+  ([#156](https://github.com/raine/claude-code-proxy/pull/156))
+
 ## v0.1.40 (2026-09-14)
 
 - Attach one or more monitor dashboards to a background proxy with
