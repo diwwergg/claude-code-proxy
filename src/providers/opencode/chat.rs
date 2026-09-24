@@ -1084,6 +1084,16 @@ impl LiveStreamTranslator {
     pub fn is_finished(&self) -> bool {
         self.state.finished
     }
+
+    pub fn ping_chunk(&mut self) -> Vec<u8> {
+        if self.state.finished {
+            return Vec::new();
+        }
+        let mut out = Vec::new();
+        self.state.ensure_message_start(&mut out);
+        emit(&mut out, "ping", json!({"type":"ping"}));
+        out
+    }
 }
 
 fn validate_post_done_metadata(data: &str) -> anyhow::Result<()> {

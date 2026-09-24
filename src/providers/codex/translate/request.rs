@@ -973,7 +973,7 @@ fn build_input(req: &MessagesRequest) -> Vec<ResponsesInputItem> {
                             flush_text(&mut out, &mut text_parts);
                             out.push(ResponsesInputItem::Reasoning {
                                 id: replay.id,
-                                summary: Vec::new(),
+                                summary: replay.summary,
                                 encrypted_content: replay.encrypted_content,
                             });
                         }
@@ -1121,9 +1121,14 @@ fn render_tool_result_image(block: &Value) -> RenderedToolResultPart {
         return RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block));
     };
     match source.get("type").and_then(Value::as_str) {
-        Some("url") if source.get("url").and_then(Value::as_str).is_some() => {
-            RenderedToolResultPart::Text("[image omitted: url]".to_string())
-        }
+        Some("url") => source
+            .get("url")
+            .and_then(Value::as_str)
+            .filter(|url| !url.is_empty())
+            .map(|url| RenderedToolResultPart::Image(url.to_string()))
+            .unwrap_or_else(|| {
+                RenderedToolResultPart::Text(unsupported_tool_result_block_to_string(block))
+            }),
         Some("base64") => {
             let media_type = source.get("media_type").and_then(Value::as_str);
             let data = source.get("data").and_then(Value::as_str);
@@ -2315,7 +2320,7 @@ mod tests {
     }
 
     #[test]
-    fn unsupported_tool_result_images_become_in_place_text_placeholders() {
+    fn url_tool_result_images_are_preserved_and_invalid_images_become_placeholders() {
         let rendered = render_tool_result(&json!([
             {"type": "text", "text": "before"},
             {"type": "image", "source": {
@@ -2337,9 +2342,13 @@ mod tests {
 
         assert_eq!(
             serde_json::to_value(function_call_output(rendered)).unwrap(),
-            json!(
-                "before\n[image omitted: url]\n[unsupported content block omitted: image]\n[unsupported content block omitted: image]\nafter"
-            )
+            json!([
+                {"type":"input_text","text":"before"},
+                {"type":"input_image","image_url":"https://example.invalid/a.png"},
+                {"type":"input_text","text":"[unsupported content block omitted: image]"},
+                {"type":"input_text","text":"[unsupported content block omitted: image]"},
+                {"type":"input_text","text":"after"}
+            ])
         );
     }
 
@@ -2566,6 +2575,7 @@ mod tests {
     fn assistant_thinking_signature_replays_codex_reasoning_item() {
         let replay = super::super::reasoning_signature::ReasoningReplay {
             id: "rs_1".to_string(),
+            summary: vec![json!({"type":"summary_text","text":"visible summary"})],
             encrypted_content: "opaque".to_string(),
         };
         let signature =
@@ -2597,7 +2607,10 @@ mod tests {
             unreachable!();
         };
         assert_eq!(id, "rs_1");
-        assert!(summary.is_empty());
+        assert_eq!(
+            summary,
+            &vec![json!({"type":"summary_text","text":"visible summary"})]
+        );
         assert_eq!(encrypted_content, "opaque");
         assert!(matches!(
             out.input.get(reasoning_index + 1),

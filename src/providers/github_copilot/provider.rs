@@ -46,12 +46,15 @@ const COPILOT_TOKEN_URL: &str = "https://api.github.com/copilot_internal/v2/toke
 const COPILOT_BASE_URL: &str = "https://api.githubcopilot.com";
 const PREFIX: &str = "github-copilot:";
 const COPILOT_PREFIX: &str = "copilot:";
+const MIN_RESPONSES_OUTPUT_TOKENS: u32 = 16;
+const STREAM_KEEPALIVE_INTERVAL: Duration = Duration::from_secs(15);
 const FALLBACK_MODELS: &[&str] = &[
     "gpt-5.4",
     "gpt-5.4-mini",
     "gpt-5.5",
     "gpt-5.6-luna",
     "gpt-5.6-sol",
+    "gpt-5.6-sol-fast",
     "gpt-5.6-terra",
     "claude-sonnet-4.6",
     "claude-opus-4.7",
@@ -267,14 +270,8 @@ async fn send_upstream(
         m.model_resolved(&ctx.req_id, model);
         m.upstream_started(&ctx.req_id);
     }
-    let payload = match wire {
-        WireApi::Chat => {
-            serde_json::to_value(chat::prepare_request(body, model).map_err(invalid_request)?)
-                .map_err(|e| invalid_request(e.to_string()))?
-        }
-        WireApi::Responses => responses::prepare_request(body, model, ctx.session_id.clone())
-            .map_err(invalid_request)?,
-    };
+    let payload = prepare_upstream_payload(body, model, wire, ctx.session_id.clone())
+        .map_err(invalid_request)?;
     if let Some(t) = ctx.traffic.as_ref() {
         t.write_json("020-upstream-request", &payload);
     }
@@ -339,6 +336,25 @@ async fn send_upstream(
     Err(error)
 }
 
+fn prepare_upstream_payload(
+    body: &MessagesRequest,
+    model: &str,
+    wire: WireApi,
+    session_id: Option<String>,
+) -> anyhow::Result<Value> {
+    let mut payload = match wire {
+        WireApi::Chat => serde_json::to_value(chat::prepare_request(body, model)?)?,
+        WireApi::Responses => responses::prepare_request(body, model, session_id)?,
+    };
+    if wire == WireApi::Responses
+        && let Some(max_tokens) = payload.get("max_output_tokens").and_then(Value::as_u64)
+        && max_tokens < u64::from(MIN_RESPONSES_OUTPUT_TOKENS)
+    {
+        payload["max_output_tokens"] = serde_json::json!(MIN_RESPONSES_OUTPUT_TOKENS);
+    }
+    Ok(payload)
+}
+
 fn count_sse_events(bytes: &[u8]) -> u64 {
     String::from_utf8_lossy(bytes).matches("event:").count() as u64
 }
@@ -381,7 +397,14 @@ fn chat_stream(
             return None;
         }
         loop {
-            match s.upstream.next().await {
+            let next = tokio::select! {
+                chunk = s.upstream.next() => chunk,
+                _ = tokio::time::sleep(STREAM_KEEPALIVE_INTERVAL) => {
+                    let out = s.translator.ping_chunk();
+                    return Some((Ok::<Bytes, Infallible>(Bytes::from(out)), s));
+                }
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
@@ -493,7 +516,14 @@ fn responses_stream(
             return None;
         }
         loop {
-            match s.upstream.next().await {
+            let next = tokio::select! {
+                chunk = s.upstream.next() => chunk,
+                _ = tokio::time::sleep(STREAM_KEEPALIVE_INTERVAL) => {
+                    let out = s.translator.ping_chunk(s.traffic.as_deref());
+                    return Some((Ok::<Bytes, Infallible>(Bytes::from(out)), s));
+                }
+            };
+            match next {
                 Some(Ok(chunk)) => {
                     if let Some(t) = s.traffic.as_ref() {
                         t.write_bytes("032-upstream-response-body.sse", &chunk);
@@ -651,15 +681,11 @@ fn error_response(error: ProviderError) -> Response {
 }
 
 fn normalize_model(model: &str) -> String {
-    let id = model
+    model
         .strip_prefix(PREFIX)
         .or_else(|| model.strip_prefix(COPILOT_PREFIX))
-        .unwrap_or(model);
-    if id.starts_with("gpt-") {
-        id.strip_suffix("-fast").unwrap_or(id).to_string()
-    } else {
-        id.to_string()
-    }
+        .unwrap_or(model)
+        .to_string()
 }
 fn now_secs() -> u64 {
     SystemTime::now()
@@ -1020,19 +1046,79 @@ mod tests {
     use super::*;
     use serde_json::json;
     #[test]
-    fn gpt_fast_is_alias_only() {
+    fn gpt_fast_preserves_exact_copilot_model_id() {
         assert_eq!(
             normalize_model("github-copilot:gpt-5.6-sol-fast"),
-            "gpt-5.6-sol"
+            "gpt-5.6-sol-fast"
         );
-        assert_eq!(normalize_model("copilot:gpt-5.6-sol-fast"), "gpt-5.6-sol");
-        assert!(advertised_models().iter().all(|m| !m.ends_with("-fast")));
+        assert_eq!(
+            normalize_model("copilot:gpt-5.6-sol-fast"),
+            "gpt-5.6-sol-fast"
+        );
+        assert!(
+            advertised_models()
+                .iter()
+                .any(|model| model == "copilot:gpt-5.6-sol-fast")
+        );
     }
     #[test]
     fn gpt_uses_responses_api() {
         assert_eq!(WireApi::for_model("gpt-5.6-sol"), WireApi::Responses);
         assert_eq!(WireApi::for_model("claude-sonnet-4.6"), WireApi::Chat);
     }
+    #[test]
+    fn responses_payload_clamps_output_tokens_to_copilot_minimum() {
+        let body: MessagesRequest = serde_json::from_value(json!({
+            "model": "copilot:gpt-6-sol",
+            "max_tokens": 1,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let payload = prepare_upstream_payload(&body, "gpt-6-sol", WireApi::Responses, None)
+            .expect("prepare Copilot Responses payload");
+
+        assert_eq!(payload["max_output_tokens"], MIN_RESPONSES_OUTPUT_TOKENS);
+    }
+
+    #[test]
+    fn responses_payload_preserves_valid_output_tokens() {
+        let body: MessagesRequest = serde_json::from_value(json!({
+            "model": "copilot:gpt-6-luna",
+            "max_tokens": 32,
+            "messages": [{"role": "user", "content": "hello"}]
+        }))
+        .unwrap();
+
+        let payload = prepare_upstream_payload(&body, "gpt-6-luna", WireApi::Responses, None)
+            .expect("prepare Copilot Responses payload");
+
+        assert_eq!(payload["max_output_tokens"], 32);
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn idle_responses_stream_emits_downstream_keepalive() {
+        let upstream: Upstream = Box::pin(futures_util::stream::pending());
+        let body = responses_stream(
+            upstream,
+            "msg_1".into(),
+            "gpt-6-sol".into(),
+            1,
+            None,
+            "req_1".into(),
+            None,
+        );
+        let mut stream = body.into_data_stream();
+        let pending = tokio::spawn(async move { stream.next().await });
+        tokio::task::yield_now().await;
+        tokio::time::advance(STREAM_KEEPALIVE_INTERVAL).await;
+
+        let chunk = pending.await.unwrap().unwrap().unwrap();
+        let text = String::from_utf8(chunk.to_vec()).unwrap();
+        assert!(text.contains("event: message_start"));
+        assert!(text.contains("event: ping"));
+    }
+
     #[test]
     fn millisecond_expiry_is_normalized() {
         assert_eq!(normalize_expiry(1_900_000_000_000), 1_900_000_000);

@@ -162,7 +162,7 @@ struct ActiveThinking {
 fn reasoning_input_item(replay: ReasoningReplay) -> ResponsesInputItem {
     ResponsesInputItem::Reasoning {
         id: replay.id,
-        summary: Vec::new(),
+        summary: replay.summary,
         encrypted_content: replay.encrypted_content,
     }
 }

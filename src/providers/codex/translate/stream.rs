@@ -753,6 +753,6 @@ mod tests {
             .unwrap();
         assert!(thinking_delta < signature_delta);
         assert!(signature_delta < thinking_stop);
-        assert!(out.contains("ccp:codex:v1:"));
+        assert!(out.contains("ccp:codex:v2:"));
     }
 }

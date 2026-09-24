@@ -616,7 +616,7 @@ mod tests {
             content[0]["signature"]
                 .as_str()
                 .unwrap()
-                .starts_with("ccp:codex:v1:")
+                .starts_with("ccp:codex:v2:")
         );
     }
 }

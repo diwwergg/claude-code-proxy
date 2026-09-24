@@ -20,6 +20,7 @@ pub const ANTHROPIC_STYLE_ALIASES: &[&str] = &[
     "claude-opus-4-7",
     "claude-opus-4-8",
     "claude-opus-5",
+    "claude-opus-5-5",
     "fable",
     "claude-fable-5",
 ];
@@ -51,6 +52,8 @@ pub(crate) const CODEX_MODELS: &[&str] = &[
     "gpt-5.6-sol",
     "gpt-5.6-terra",
     "gpt-6-astra",
+    "gpt-6-luna",
+    "gpt-6-sol",
 ];
 
 pub(crate) const KIMI_MODELS: &[&str] = &["kimi-for-coding", "kimi-k2.6", "kimi-k3", "k2.6", "k3"];
@@ -226,14 +229,16 @@ pub fn normalize_incoming_model(model: &str) -> String {
     } else {
         model.to_string()
     };
-    // Compatibility only: old GPT `-fast` IDs now resolve to the same model.
-    // Do not touch non-GPT names such as cursor-composer-fast or grok-*-fast.
+    // Compatibility only: Codex GPT `-fast` aliases resolve to the base model.
+    // Copilot exposes some `-fast` IDs as distinct models, so preserve them.
     let bare = normalized
         .strip_prefix(GITHUB_COPILOT_PREFIX)
         .or_else(|| normalized.strip_prefix(COPILOT_PREFIX))
         .or_else(|| normalized.strip_prefix(OPENAI_PREFIX))
         .unwrap_or(&normalized);
-    if bare.starts_with("gpt-") && bare.ends_with("-fast") {
+    let is_copilot_model =
+        normalized.starts_with(GITHUB_COPILOT_PREFIX) || normalized.starts_with(COPILOT_PREFIX);
+    if !is_copilot_model && bare.starts_with("gpt-") && bare.ends_with("-fast") {
         let collapsed = bare.trim_end_matches("-fast");
         normalized = if normalized.starts_with(GITHUB_COPILOT_PREFIX) {
             format!("{GITHUB_COPILOT_PREFIX}{collapsed}")
@@ -368,11 +373,11 @@ mod tests {
         );
         assert_eq!(
             normalize_incoming_model("github-copilot:gpt-5.4-fast"),
-            "github-copilot:gpt-5.4"
+            "github-copilot:gpt-5.4-fast"
         );
         assert_eq!(
             normalize_incoming_model("copilot:gpt-5.4-fast[128k]"),
-            "copilot:gpt-5.4"
+            "copilot:gpt-5.4-fast"
         );
         assert_eq!(
             normalize_incoming_model("openai:gpt-5.4-fast[200k]"),
@@ -450,6 +455,17 @@ mod tests {
                 .name(),
             "grok"
         );
+    }
+
+    #[test]
+    fn gpt_6_sol_and_luna_route_to_codex() {
+        let registry = Registry::new(AliasProvider::Codex);
+        for model in ["gpt-6-sol", "gpt-6-sol-fast", "gpt-6-luna"] {
+            assert_eq!(
+                registry.provider_for_model(model, None).unwrap().name(),
+                "codex"
+            );
+        }
     }
 
     #[test]
