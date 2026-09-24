@@ -1,7 +1,8 @@
 use base64::Engine;
 use serde_json::Value;
 
-const PREFIX: &str = "ccp:codex:v1:";
+const V1_PREFIX: &str = "ccp:codex:v1:";
+const V2_PREFIX: &str = "ccp:codex:v2:";
 const MAX_ID_BYTES: usize = 4 * 1024;
 const MAX_ENCRYPTED_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 
@@ -12,18 +13,20 @@ const MAX_ENCRYPTED_CONTENT_BYTES: usize = 8 * 1024 * 1024;
 /// traffic captures redact the whole value. Keeping the check beside the
 /// encoder keeps the format definition in one place.
 pub(crate) fn is_proxy_reasoning_signature(signature: &str) -> bool {
-    signature.starts_with(PREFIX)
+    signature.starts_with(V1_PREFIX) || signature.starts_with(V2_PREFIX)
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReasoningReplay {
     pub id: String,
+    pub summary: Vec<Value>,
     pub encrypted_content: String,
 }
 
 #[derive(Debug, Clone, Default)]
 pub struct PendingReasoning {
     id: Option<String>,
+    summary: Vec<Value>,
     encrypted_content: Option<String>,
 }
 
@@ -35,11 +38,15 @@ impl PendingReasoning {
         if let Some(encrypted_content) = non_empty_string(item.get("encrypted_content")) {
             self.encrypted_content = Some(encrypted_content.to_string());
         }
+        if let Some(summary) = item.get("summary").and_then(Value::as_array) {
+            self.summary = summary.clone();
+        }
     }
 
     pub fn replay(&self) -> Option<ReasoningReplay> {
         Some(ReasoningReplay {
             id: self.id.clone()?,
+            summary: self.summary.clone(),
             encrypted_content: self.encrypted_content.clone()?,
         })
     }
@@ -53,12 +60,45 @@ pub fn encode_reasoning_signature(replay: &ReasoningReplay) -> Option<String> {
     {
         return None;
     }
-    let encoded_id = base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(replay.id.as_bytes());
-    Some(format!("{PREFIX}{encoded_id}:{}", replay.encrypted_content))
+    let payload = serde_json::to_vec(&serde_json::json!({
+        "id": replay.id,
+        "summary": replay.summary,
+        "encrypted_content": replay.encrypted_content,
+    }))
+    .ok()?;
+    if payload.len() > max_payload_len() {
+        return None;
+    }
+    Some(format!(
+        "{V2_PREFIX}{}",
+        base64::engine::general_purpose::URL_SAFE_NO_PAD.encode(payload)
+    ))
 }
 
 pub fn decode_reasoning_signature(signature: &str) -> Option<ReasoningReplay> {
-    let payload = signature.strip_prefix(PREFIX)?;
+    if let Some(payload) = signature.strip_prefix(V2_PREFIX) {
+        if payload.is_empty() || payload.len() > encoded_payload_len_limit() {
+            return None;
+        }
+        let decoded = base64::engine::general_purpose::URL_SAFE_NO_PAD
+            .decode(payload)
+            .ok()?;
+        if decoded.len() > max_payload_len() {
+            return None;
+        }
+        let value: Value = serde_json::from_slice(&decoded).ok()?;
+        let id = non_empty_string(value.get("id"))?;
+        let encrypted_content = non_empty_string(value.get("encrypted_content"))?;
+        if id.len() > MAX_ID_BYTES || encrypted_content.len() > MAX_ENCRYPTED_CONTENT_BYTES {
+            return None;
+        }
+        return Some(ReasoningReplay {
+            id: id.to_string(),
+            summary: value.get("summary")?.as_array()?.clone(),
+            encrypted_content: encrypted_content.to_string(),
+        });
+    }
+    let payload = signature.strip_prefix(V1_PREFIX)?;
     if payload.is_empty() || payload.len() > max_payload_len() {
         return None;
     }
@@ -78,6 +118,7 @@ pub fn decode_reasoning_signature(signature: &str) -> Option<ReasoningReplay> {
     }
     Some(ReasoningReplay {
         id: String::from_utf8(id).ok()?,
+        summary: Vec::new(),
         encrypted_content: encrypted_content.to_string(),
     })
 }
@@ -88,6 +129,10 @@ fn encoded_id_len_limit() -> usize {
 
 fn max_payload_len() -> usize {
     encoded_id_len_limit() + 1 + MAX_ENCRYPTED_CONTENT_BYTES
+}
+
+fn encoded_payload_len_limit() -> usize {
+    max_payload_len().div_ceil(3) * 4
 }
 
 fn non_empty_string(value: Option<&Value>) -> Option<&str> {
@@ -103,11 +148,11 @@ mod tests {
     fn signature_round_trip_preserves_reasoning_identity() {
         let replay = ReasoningReplay {
             id: "rs_1".to_string(),
+            summary: vec![json!({"type":"summary_text","text":"plan"})],
             encrypted_content: "gAAAAopaque".to_string(),
         };
         let signature = encode_reasoning_signature(&replay).unwrap();
-        assert!(signature.starts_with(PREFIX));
-        assert!(signature.ends_with(":gAAAAopaque"));
+        assert!(signature.starts_with(V2_PREFIX));
         assert_eq!(decode_reasoning_signature(&signature), Some(replay));
     }
 
@@ -122,6 +167,7 @@ mod tests {
         let mut pending = PendingReasoning::default();
         pending.capture(&json!({
             "id": "rs_1",
+            "summary": [{"type":"summary_text","text":"plan"}],
             "encrypted_content": "early"
         }));
         pending.capture(&json!({"id": "rs_1"}));
@@ -129,6 +175,7 @@ mod tests {
             pending.replay(),
             Some(ReasoningReplay {
                 id: "rs_1".to_string(),
+                summary: vec![json!({"type":"summary_text","text":"plan"})],
                 encrypted_content: "early".to_string(),
             })
         );
@@ -137,7 +184,7 @@ mod tests {
     #[test]
     fn oversized_signature_is_ignored_without_decoding() {
         let signature = format!(
-            "{PREFIX}cnNfMQ:{}",
+            "{V1_PREFIX}cnNfMQ:{}",
             "A".repeat(MAX_ENCRYPTED_CONTENT_BYTES + 1)
         );
         assert_eq!(decode_reasoning_signature(&signature), None);
