@@ -6,6 +6,7 @@ description: Release notes for claude-code-proxy.
 ## v1.1.42 (2026-09-24)
 
 - Merged upstream `v0.1.42`.
+
 - Codex users can select GPT-6 Sol and GPT-6 Luna, including their `-fast`
   priority-tier variants.
   ([#165](https://github.com/raine/claude-code-proxy/pull/165))
