@@ -3,6 +3,20 @@ title: Changelog
 description: Release notes for claude-code-proxy.
 ---
 
+## v1.1.42 (2026-09-24)
+
+- Merged upstream `v0.1.42`.
+
+- Codex users can select GPT-6 Sol and GPT-6 Luna, including their `-fast`
+  priority-tier variants.
+  ([#165](https://github.com/raine/claude-code-proxy/pull/165))
+- Codex now defaults to GPT-6 Sol. Opus and Fable aliases use GPT-6 Sol,
+  Haiku aliases use GPT-6 Luna, and the Claude Opus 5.5 alias is supported.
+  Sonnet remains on GPT-5.6 Terra.
+  ([#165](https://github.com/raine/claude-code-proxy/pull/165))
+- Grok users can select Grok 4.7 with `grok-4.7`.
+  ([#162](https://github.com/raine/claude-code-proxy/pull/162))
+
 ## v1.1.41 (2026-09-22)
 
 - Merged upstream `v0.1.41` and the subsequent Grok 4.7 support.
